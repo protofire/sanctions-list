@@ -15,6 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     env:
       SLS_URL: 'https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ENHANCED.XML'
     steps:
@@ -41,14 +42,22 @@ jobs:
             git push origin HEAD:main
           fi
           if [ -f proposal.json ]; then
-            sha=$(node -p "require('./proposal.json').sourceSha256.slice(0, 12)")
-            if ! git ls-remote --exit-code origin "refs/heads/shrink/$sha" > /dev/null; then
-              git switch -c "shrink/$sha"
+            proposal_sha=$(node -p "require('./proposal.json').sourceSha256")
+            pending_sha=""
+            if git ls-remote --exit-code origin refs/heads/shrink/pending > /dev/null; then
+              git fetch origin shrink/pending
+              pending_sha=$(git show origin/shrink/pending:sanctioned-evm/latest.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).sourceSha256" 2>/dev/null || true)
+            fi
+            if [ "$pending_sha" != "$proposal_sha" ]; then
+              git switch -c shrink/pending
               cp proposal.json sanctioned-evm/latest.json
               git commit -am "list: OFAC delisting to $(node -p "require('./proposal.json').count") addresses"
-              git push origin "shrink/$sha"
-              gh pr create --base main --head "shrink/$sha" \
-                --title "Review OFAC delisting ($sha)" \
+              git push --force origin shrink/pending
+              git switch main
+            fi
+            if [ "$(gh pr list --head shrink/pending --state open --json number --jq length)" = "0" ]; then
+              gh pr create --base main --head shrink/pending \
+                --title "Review pending OFAC delisting" \
                 --body "The new SDN extract removes more than 10% or more than 20 EVM addresses. Spot-check removed addresses on https://sanctionssearch.ofac.treas.gov/ and OFAC recent actions, then merge. Until merged, the previous (larger) list stays live."
             fi
           fi
