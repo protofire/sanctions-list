@@ -1,0 +1,54 @@
+name: build-list
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [sanctioned-evm/latest.json] # a human merge of a shrink PR refreshes checkedAt; bot pushes do not retrigger
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: build-list
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SLS_URL: 'https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ENHANCED.XML'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - name: Download SDN from OFAC SLS
+        run: curl -fsSL --retry 3 -D headers.txt -o sdn.xml "$SLS_URL"
+      - name: Build list
+        run: |
+          published=$(grep -i '^last-modified:' headers.txt | cut -d' ' -f2- | tr -d '\r' || true)
+          node build.mjs sdn.xml sanctioned-evm/latest.json "$published"
+      - name: Commit to main, propose shrink
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add sanctioned-evm/latest.json
+          if ! git diff --cached --quiet; then
+            git commit -m "list: $(node -p "require('./sanctioned-evm/latest.json').count") addresses, checked $(date -u +%FT%TZ)"
+            git push origin HEAD:main
+          fi
+          if [ -f proposal.json ]; then
+            sha=$(node -p "require('./proposal.json').sourceSha256.slice(0, 12)")
+            if ! git ls-remote --exit-code origin "refs/heads/shrink/$sha" > /dev/null; then
+              git switch -c "shrink/$sha"
+              cp proposal.json sanctioned-evm/latest.json
+              git commit -am "list: OFAC delisting to $(node -p "require('./proposal.json').count") addresses"
+              git push origin "shrink/$sha"
+              gh pr create --base main --head "shrink/$sha" \
+                --title "Review OFAC delisting ($sha)" \
+                --body "The new SDN extract removes more than 10% or more than 20 EVM addresses. Spot-check removed addresses on https://sanctionssearch.ofac.treas.gov/ and OFAC recent actions, then merge. Until merged, the previous (larger) list stays live."
+            fi
+          fi

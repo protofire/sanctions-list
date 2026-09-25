@@ -1,0 +1,1 @@
+{ "name": "sanctions-list", "private": true, "type": "module", "scripts": { "test": "node --test" } }
